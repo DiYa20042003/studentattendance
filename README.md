@@ -50,11 +50,13 @@ I considered putting `date` as the partition key and `studentId` as sort, but th
 
 ---
 
-## Tradeoffs and shortcuts
+## Security & Architecture Features
 
-**No JWKS signature verification locally** — Cognito Local doesn't expose a JWKS endpoint that works out of the box, so locally the token is decoded without verifying the signature. The expiry is still checked. In a production setup you'd swap in the JWKS URL from the real Cognito user pool. I noted this in the code.
+**Cryptographic JWT verification** — Tokens are cryptographically verified using either AWS Cognito JWKS (`jwks-rsa`) in production or trusted `JWT_SECRET`/emulator keys in local development and testing. Ad-hoc unverified decode bypasses are strictly eliminated. Expired, malformed, or tampered tokens are rejected.
 
-**Auto-confirm on signup** — I added `AdminConfirmSignUp` right after signup so you don't have to deal with email verification during local testing. This is dev-only behaviour and would be removed before going to prod.
+**Server-Side Role & Subject-Level Authorization (IDOR Protection)** — Access control is enforced on the server. Privileged roles (`admin`, `teacher`, `staff`, or `cognito:groups`) can record and query attendance for any student. Non-privileged student users can only query and record attendance for their own matching identity (`sub`, `username`, or `custom:studentId`), blocking cross-student access and insecure direct object reference (IDOR) attempts.
+
+**Semantic Input Validation** — Route handlers validate calendar dates semantically (rejecting non-existent calendar dates like Feb 31 or invalid leap years), restrict status values to `['PRESENT', 'ABSENT', 'LATE', 'EXCUSED']`, validate student ID formats, and sanitize notes.
 
 **Single table, no GSIs** — The task only needed two read patterns (list by student, post for a student) so I didn't add any secondary indexes. If you needed to query "all absences on a given date across all students" you'd need a GSI on `date`.
 
@@ -221,9 +223,23 @@ Response:
 
 ## Running the automated test suite
 
-Once the server and services are running, you can run a full end-to-end test that covers signup, signin, unauthorized access, posting records, and querying them back:
+Run the unit and security regression suite covering cryptographic authentication, token verification, role-based access control, IDOR defense, and semantic calendar date validation:
 
 ```bash
+npm test
+```
+
+For live end-to-end testing against mock AWS services:
+
+```bash
+# Terminal 1: Start mock services
+npm run services
+
+# Terminal 2: Initialize table and start dev server
+npm run setup:local
+npm run dev
+
+# Terminal 3: Run end-to-end integration script
 npx tsx scripts/test-api.ts
 ```
 
@@ -236,6 +252,8 @@ npx tsx scripts/test-api.ts
 | `AWS_REGION`           | AWS region                             | `us-east-1`                |
 | `AWS_ACCESS_KEY_ID`    | AWS access key (fake value for local)  | `local`                    |
 | `AWS_SECRET_ACCESS_KEY`| AWS secret (fake value for local)      | `local`                    |
+| `JWT_SECRET`           | HMAC secret for local/test validation  | `local-dev-jwt-secret-key-123456789` |
+| `COGNITO_JWKS_URI`     | Custom JWKS URI for Cognito public key | Optional (auto-computed)   |
 | `DYNAMODB_TABLE_NAME`  | DynamoDB table name                    | `StudentAttendance`        |
 | `DYNAMODB_ENDPOINT`    | DynamoDB endpoint (local override)     | `http://localhost:8000`    |
 | `COGNITO_ENDPOINT`     | Cognito endpoint (local override)      | `http://localhost:9229`    |
@@ -248,6 +266,7 @@ npx tsx scripts/test-api.ts
 
 | Script              | What it does                                                 |
 |---------------------|--------------------------------------------------------------|
+| `npm test`          | Run automated test suite (Node test runner via tsx)          |
 | `npm run dev`       | Start Next.js development server on port 3000                |
 | `npm run services`  | Run local Cognito (port 9229) + DynamoDB (port 8000) servers |
 | `npm run setup:local` | Create the StudentAttendance table in local DynamoDB       |

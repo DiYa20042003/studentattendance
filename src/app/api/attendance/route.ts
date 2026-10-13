@@ -1,18 +1,23 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { PutCommand } from '@aws-sdk/lib-dynamodb';
 import { docClient, TABLE_NAME } from '@/lib/aws/dynamodb-client';
-import { verifyAuthToken } from '@/lib/auth/verify-token';
+import { verifyAuthToken, authorizeStudentAccess } from '@/lib/auth/verify-token';
 import { CreateAttendanceDTO, AttendanceRecord } from '@/lib/types/attendance';
-
-const VALID_STATUSES = ['PRESENT', 'ABSENT', 'LATE', 'EXCUSED'] as const;
+import {
+  isValidCalendarDate,
+  isValidStatus,
+  isValidStudentId,
+  sanitizeNotes,
+  VALID_STATUSES,
+} from '@/lib/validation/attendance-validation';
 
 export async function POST(req: NextRequest) {
   const auth = await verifyAuthToken(req);
-  if (!auth.authenticated) {
+  if (!auth.authenticated || !auth.user) {
     return NextResponse.json({ error: auth.error ?? 'Unauthorized' }, { status: 401 });
   }
 
-  let body: CreateAttendanceDTO;
+  let body: Partial<CreateAttendanceDTO>;
   try {
     body = await req.json();
   } catch {
@@ -21,31 +26,43 @@ export async function POST(req: NextRequest) {
 
   const { studentId, date, status, notes } = body;
 
-  if (!studentId || typeof studentId !== 'string') {
-    return NextResponse.json({ error: 'studentId is required' }, { status: 400 });
-  }
-
-  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+  if (!isValidStudentId(studentId)) {
     return NextResponse.json(
-      { error: 'date must be in YYYY-MM-DD format' },
+      { error: 'studentId is required and must be between 1 and 64 valid characters' },
       { status: 400 }
     );
   }
 
-  if (!status || !VALID_STATUSES.includes(status)) {
+  if (!isValidCalendarDate(date)) {
+    return NextResponse.json(
+      { error: 'date must be a valid calendar date in YYYY-MM-DD format' },
+      { status: 400 }
+    );
+  }
+
+  if (!isValidStatus(status)) {
     return NextResponse.json(
       { error: `status must be one of: ${VALID_STATUSES.join(', ')}` },
       { status: 400 }
     );
   }
 
+  // Enforce server-side authorization: students can only record for themselves; admins/staff can record for anyone
+  const authz = authorizeStudentAccess(auth.user, studentId, 'write');
+  if (!authz.authorized) {
+    return NextResponse.json(
+      { error: authz.reason ?? 'Forbidden: Access denied' },
+      { status: 403 }
+    );
+  }
+
   try {
     const now = new Date().toISOString();
     const record: AttendanceRecord = {
-      studentId,
+      studentId: studentId.trim(),
       date,
       status,
-      notes: notes ?? '',
+      notes: sanitizeNotes(notes),
       createdAt: now,
       updatedAt: now,
     };
